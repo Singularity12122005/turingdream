@@ -1,0 +1,723 @@
+ <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+
+        // ==========================================
+        // 0. PROCEDURAL AUDIO ENGINE (Turing's Sound)
+        // ==========================================
+        class DreamAudio {
+            constructor() {
+                this.ctx = null;
+                this.master = null;
+                this.filter = null;
+                this.oscillators = [];
+                this.isInit = false;
+            }
+
+            init() {
+                if (this.isInit) return;
+                try {
+                    const AudioContext = window.AudioContext || window.webkitAudioContext;
+                    this.ctx = new AudioContext();
+                    
+                    // Master Chain
+                    this.master = this.ctx.createGain();
+                    this.master.gain.value = 0.4; // Base volume
+                    this.master.connect(this.ctx.destination);
+
+                    // Lowpass Filter (Controlled by Heat)
+                    this.filter = this.ctx.createBiquadFilter();
+                    this.filter.type = 'lowpass';
+                    this.filter.frequency.value = 200; // Deep muffled start
+                    this.filter.Q.value = 1;
+                    this.filter.connect(this.master);
+
+                    // Reverb (Simple Delay Simulation)
+                    const delay = this.ctx.createDelay();
+                    delay.delayTime.value = 0.4;
+                    const feedback = this.ctx.createGain();
+                    feedback.gain.value = 0.4;
+                    this.filter.connect(delay);
+                    delay.connect(feedback);
+                    feedback.connect(delay);
+                    delay.connect(this.master);
+
+                    // Drone Oscillators (Ethereal Chord)
+                    // Frequencies: A2(110), E3(164.8), A3(220) + Detuning
+                    const freqs = [110, 164.81, 220, 221]; 
+                    
+                    freqs.forEach(f => {
+                        const osc = this.ctx.createOscillator();
+                        osc.type = 'sine';
+                        osc.frequency.value = f;
+                        
+                        const oscGain = this.ctx.createGain();
+                        oscGain.gain.value = 0.15;
+                        
+                        // LFO for subtle movement
+                        const lfo = this.ctx.createOscillator();
+                        lfo.frequency.value = 0.1 + Math.random() * 0.2;
+                        const lfoGain = this.ctx.createGain();
+                        lfoGain.gain.value = 2.0; // Pitch wobble amount
+                        lfo.connect(lfoGain);
+                        lfoGain.connect(osc.frequency);
+                        lfo.start();
+
+                        osc.connect(oscGain);
+                        oscGain.connect(this.filter);
+                        osc.start();
+                        
+                        this.oscillators.push({osc, oscGain});
+                    });
+
+                    this.isInit = true;
+                    console.log("Audio Engine Started");
+                } catch(e) {
+                    console.error("Audio Init Failed:", e);
+                }
+            }
+
+            // Modulate sound based on Ritual Energy
+            setIntensity(heat) {
+                if(!this.ctx || !this.filter) return;
+                
+                // Map heat (0-1.5) to Filter Frequency (200Hz - 1200Hz)
+                const targetFreq = 200 + (heat * 800);
+                this.filter.frequency.setTargetAtTime(targetFreq, this.ctx.currentTime, 0.2);
+                
+                // Increase volume slightly with heat
+                const targetVol = 0.4 + (heat * 0.2);
+                this.master.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.2);
+            }
+        }
+
+        // ==========================================
+        // 1. THE CANONICAL ARCHIVE (100 LOTS)
+        // ==========================================
+        const LOT_DB = [
+            ["上上", "天开地辟结良缘\n日吉时良万事全\n若得此签非小可\n人行中正帝王宣", "诸事如意，名利双收。"],
+            ["中平", "鲸鱼未变守江河\n不可升腾离碧波\n异日峥嵘身变化\n许君一跃跳龙门", "时机未到，静待蜕变。"],
+            ["下下", "冲风冒雨去还归\n役役劳心似燕儿\n衔得泥来成垒后\n到头垒坏复成泥", "劳而无功，需反思方向。"],
+            ["中吉", "菱花镜破复重圆\n女再求夫男再婚\n自此门庭重改换\n更添福禄与儿孙", "破镜重圆，否极泰来。"],
+            ["中平", "一锄掘地要求泉\n努力求之得最先\n无意俄然遇知己\n相逢携手上青天", "贵人相助，但需主动努力。"],
+            ["上上", "投身岩下饲于菟\n须是还他大丈夫\n舍己也应难再得\n通行天下此人无", "舍己为人，终得福报。"],
+            ["中吉", "奔波阻隔重重险\n带水拖泥去度山\n更望他乡求用事\n千乡万里未回还", "远行求利，需防波折。"],
+            ["上上", "茂林松柏正兴旺\n雨雪风霜总不摧\n异日自然成大用\n功名作个栋梁材", "根基稳固，前途光明。"],
+            ["中平", "愿君勿问心中事\n此意偏宜说向公\n一片明心光皎洁\n宛如皓月正当中", "光明磊落，无需隐瞒。"],
+            ["中吉", "櫜弓裹箭两纷纷\n须识权宜进与退\n天子旌旗分贵贱\n庶人到此必防身", "审时度势，进退有度。"],
+            ["中平", "欲求好事喜非常\n争奈姻亲只暂忙\n毕竟到头成好事\n贵人接引贵人乡", "好事多磨，终得贵人助。"],
+            ["上上", "时临否极泰当来\n抖擞从君出暗埃\n若遇卯寅佳信至\n管教立志事和谐", "否极泰来，运势转佳。"],
+            ["下下", "命中正逢罗孛关\n用尽心机总未安\n作福问神难得过\n恰是行舟上高滩", "运势低迷，宜守不宜进。"],
+            ["中吉", "宛如仙鹤出凡笼\n脱得凡笼路路通\n南北东西无阻隔\n任君直上九霄中", "摆脱束缚，自由发展。"],
+            ["中平", "行人一口气难吞\n却有灾殃近尔身\n不遇虎头人一唤\n全家谁保汝无凶", "谨防意外，需贵人化解。"],
+            ["上上", "官事悠悠难辨明\n不如息了且归耕\n旁人煽惑君休信\n此事当谋亲弟兄", "以和为贵，远离是非。"],
+            ["中吉", "莫听闲言说是非\n晨昏只好念阿弥\n若将妄语为真实\n画饼如何疗得饥", "谨言慎行，专注修行。"],
+            ["上上", "金乌西坠兔东升\n日夜循环至古今\n僧道得之无不利\n士农工商各从心", "顺应天时，万事亨通。"],
+            ["中平", "急水滩头放艇时\n狂风作浪欲何为\n待他浪静风停后\n稳载船归过不危", "以静制动，待机而行。"],
+            ["上上", "当春久雨喜初晴\n玉兔金乌渐渐明\n旧事已成新事遂\n看看一跳入蓬瀛", "苦尽甘来，新机出现。"],
+            ["中吉", "阴阳道合总由天\n女嫁男婚岂偶然\n但看龙蛇堪运动\n熊罴叶梦喜团圆", "姻缘天定，水到渠成。"],
+            ["中平", "旱时田里皆枯槁\n谢天甘雨落淋淋\n花果草木皆润泽\n始知一雨值千金", "困境得助，珍惜机缘。"],
+            ["下下", "欲攀仙桂蟾宫去\n岂虑天门不放开\n谋望一般音信好\n高人自送岭头来", "目标过高，需量力而行。"],
+            ["上上", "月出光辉四海明\n前途禄位见太平\n浮云扫退终无事\n可保祸患不临身", "光明坦途，灾厄消散。"],
+            ["中平", "过了忧危事几重\n从今再立永无空\n宽心自有宽心计\n得遇高人护大功", "化险为夷，贵人扶持。"],
+            ["下下", "上下传来事总虚\n天边接得一封书\n书中许我功名遂\n直到终时亦是虚", "虚名无实，勿信空言。"],
+            ["中吉", "一谋一用一番机\n虑后思前不敢为\n时至贵人相助力\n银墙铁壁好安居", "周密计划，终得安稳。"],
+            ["上上", "东方月上正婵娟\n顷刻云遮月半边\n莫道圆时还又缺\n须教缺处复重圆", "得失无常，终归圆满。"],
+            ["中平", "宝剑出匣耀光明\n在匣全然不惹尘\n今得贵人携出现\n有威有势众人钦", "才华得展，众人敬服。"],
+            ["下下", "劝君切莫向他求\n似鹤飞来暗箭投\n若去采薪蛇伏草\n恐遭毒口也忧愁", "谨防暗算，勿信外人。"],
+            ["中吉", "无限好语君须记\n却为隐贼作良媒\n莫贪眼下有些甜\n可虑他时还受苦", "勿信甜言蜜语，谨防陷阱。"],
+            ["上上", "君皇圣后终为恩\n复待祈禳无损增\n一切有情皆受用\n人间天上得期亨", "皇恩浩荡，普天同庆。"],
+            ["中平", "天地交泰万物新\n自形自色自怡神\n森罗万象皆精彩\n事事和谐得称心", "万物和谐，顺其自然。"],
+            ["下下", "棋逢敌手要藏机\n黑白盘中未决时\n到底欲知谁胜负\n须教先着相机宜", "局势未明，谨慎行事。"],
+            ["中吉", "温柔自古胜刚强\n积善之门大吉昌\n若是有人占此卦\n宛如正渴遇琼浆", "以柔克刚，善有善报。"],
+            ["上上", "劝君耐守旧生涯\n把定身心莫听邪\n直待有人轻着力\n枯枝老树再生花", "坚守正道，枯木逢春。"],
+            ["中平", "与君万语复千言\n只为徒然费舌尖\n刻下时乖休恨望\n劝君守旧待时迁", "言多无益，静待时机。"],
+            ["下下", "阴里详看怪尔曹\n舟中敌国笑中刀\n藩篱剖破浑无事\n一种天生惜羽毛", "笑里藏刀，谨防暗算。"],
+            ["中吉", "营图万事觉春容\n夏至营求渐渐通\n更忌秋来多窒碍\n冬深方得贵人逢", "春夏顺利，秋冬需防。"],
+            ["上上", "五湖四海任君行\n高挂帆篷自在撑\n若得顺风随即至\n满船宝贝喜层层", "一帆风顺，满载而归。"],
+            ["中平", "夏日初临日正长\n人皆愁恼热非常\n天公岂解怜人意\n故遣薰风特送凉", "苦中得乐，天赐清凉。"],
+            ["下下", "水中捉月费工夫\n费尽工夫却又无\n莫信闲言并浪语\n枉劳心力强身枯", "徒劳无功，勿信谣言。"],
+            ["中吉", "失意翻成得意时\n龙吟虎啸两相宜\n青天自有通霄路\n许我功名直上梯", "逆境转顺，平步青云。"],
+            ["上上", "梦中得宝醒来无\n自谓南山只是锄\n若问婚姻并问病\n别寻条路为相扶", "虚幻不实，另寻他路。"],
+            ["中平", "父贤传子子传孙\n衣食丰隆只靠天\n堂上椿萱人快乐\n饥饭渴饮困时眠", "家运昌隆，知足常乐。"],
+            ["下下", "涧小石粗流水响\n力劳撑驾恐损伤\n路须指出前江去\n风静潮平尽不妨", "艰难前行，需防风险。"],
+            ["中吉", "说是说非风过耳\n好衣好禄自然丰\n君莫记取当年事\n汝意还如我意同", "是非如风，福禄自来。"],
+            ["上上", "忠言善语君须记\n莫向他方求别艺\n劝君安守旧生涯\n除却其余都不是", "安分守己，勿贪他求。"],
+            ["中平", "直上高山去学仙\n岂知一旦帝王宣\n青天白日常明照\n心正声名四海传", "无心插柳，名扬四海。"],
+            ["下下", "抱薪救火火增烟\n烧却三千及大千\n若问营谋并出入\n不如收拾莫忧煎", "方法错误，及时止损。"],
+            ["中吉", "日上吟诗月下歌\n逢场作戏笑呵呵\n相逢会遇难藏避\n喝彩齐唱嗹哩啰", "及时行乐，随遇而安。"],
+            ["上上", "晨昏全赖佛扶持\n虽是逢危不见危\n若得贵人来接引\n此时福禄自相随", "佛力加持，遇难成祥。"],
+            ["中平", "昔日行船失了针\n今朝依旧海中寻\n若还寻得原针在\n也费功夫也费心", "失而复得，费心劳力。"],
+            ["下下", "游鱼却在碧波池\n撞遭罗网四边围\n思量无计翻身出\n事到头来惹是非", "陷入困境，难以脱身。"],
+            ["中吉", "眼前欢喜未为欢\n危不危兮安不安\n割肉成疮因甚事\n不如守旧得安全", "乐极生悲，守旧为佳。"],
+            ["上上", "路险马乏人行急\n失群军卒困相当\n滩高风浪船棹破\n日暮花残天降霜", "险象环生，终能脱困。"],
+            ["中平", "一条金秤等君情\n无减无增无重轻\n为是平生心正直\n文章不识义皆明", "公平正直，心安理得。"],
+            ["下下", "南贩珍珠北贩盐\n年来几倍货财添\n劝君止此求田舍\n心欲多时何日厌", "贪得无厌，适可而止。"],
+            ["中吉", "冬来岭上一枝梅\n叶落枝枯总不摧\n探得阳春消息至\n依然还我作花魁", "寒冬将尽，春来花开。"],
+            ["上上", "朝朝役役恰如蜂\n飞来飞去西复东\n春尽花残无觅处\n此身不恋旧丛中", "辛勤劳作，终有收获。"],
+            ["中平", "谁知爱宠遇强徒\n女子当年嫁二夫\n自是一弓施两箭\n骑龙跨马入安居", "姻缘多变，终得安稳。"],
+            ["下下", "弄蜂须要求他蜜\n只怕遭他尾上针\n虽是眼前有异路\n暗里深藏荆棘林", "贪小失大，暗藏危机。"],
+            ["中吉", "春来雷震百虫鸣\n翻身一转离泥中\n始知出入还来往\n一朝变化便成龙", "蛰伏待机，一飞冲天。"],
+            ["上上", "崔巍崔巍复崔巍\n履险如夷去复来\n身似菩提心似镜\n长安一道放春回", "化险为夷，前程似锦。"],
+            ["中平", "宛如抱虎过高山\n战战兢兢胆不寒\n幸得山前逢妙手\n方能保得一身安", "险中求安，贵人相助。"],
+            ["下下", "鱼龙混杂意和同\n耐守寒潭未济中\n不觉一朝头角耸\n禹门一跳到天宫", "蛰伏待时，终有出头。"],
+            ["中吉", "梦中说梦获多财\n身外浮名总莫猜\n水远山遥难信定\n贵人一指笑颜开", "虚名浮利，贵人指引。"],
+            ["上上", "冷水来浇白雪洋\n不寒不热自温凉\n要行天下无他事\n惟有中藏一艺强", "技艺傍身，行遍天下。"],
+            ["中平", "虚空结愿结人缘\n保得人安愿未还\n得兔忘蹄真绝迹\n敢将初誓谩轻瞒", "许愿需还，莫忘初心。"],
+            ["下下", "直上高岩去学仙\n岂知一旦帝王宣\n青天白日常明照\n志在声名四海传", "名利心重，反失本真。"],
+            ["中吉", "梧桐叶落秋将暮\n行客归程去似飞\n谢得天公轻著力\n顺风船载宝珍归", "归程顺利，满载而归。"],
+            ["上上", "炎炎烈火焰烧天\n焰里还生一朵莲\n到底永成根不坏\n依然枝叶色新鲜", "烈火炼真金，终得正果。"],
+            ["中平", "譬若初三四五月\n半无半有未圆全\n等待十五良宵夜\n到处光明到处圆", "耐心等待，终得圆满。"],
+            ["下下", "因名丧德不和同\n切莫急中变作凶\n酒醉不知何处去\n青松影里睡朦胧", "因名失利，勿急勿躁。"],
+            ["中吉", "重关深锁闭丹霞\n音信寥寥静不哗\n好把真心存一片\n免教失路入烟霞", "坚守本心，勿入歧途。"],
+            ["上上", "春来花发映阳台\n万里舟行进宝来\n跃过禹门三级浪\n恰如平地一声雷", "时来运转，一鸣惊人。"],
+            ["中平", "人行半岭日衔山\n峻岭崖岩未可攀\n仰望上天垂护佑\n此身犹在太虚间", "前路艰险，天佑平安。"],
+            ["下下", "木雕一虎在当门\n须是有威不害人\n分明说是无防碍\n忧恼人心恐是魂", "虚惊一场，无需过虑。"],
+            ["中吉", "出入营谋大吉昌\n无瑕玉在石中藏\n如今幸得高人指\n获宝从心喜不胜", "贵人指点，心想事成。"],
+            ["上上", "忽朝一信下天墀\n宝贝船装满载归\n若问前程成底事\n始终应得贵人提", "天降喜讯，贵人相助。"],
+            ["中平", "好把愁眉须展开\n大才大用荐将来\n一条大路平如掌\n凡有施为总称怀", "展露才华，前途平坦。"],
+            ["下下", "经纶事业圣贤书\n读书事业入云衢\n莫将经纶成大用\n却于窗下作工夫", "学以致用，莫负才华。"],
+            ["中吉", "鸾凤翎毛雨压垂\n此时应被雀轻欺\n忽朝一日云霄霁\n依旧还教振羽衣", "暂时受挫，终将腾达。"],
+            ["上上", "君子莫信小人推\n事有差讹惹是非\n琴鸣须用知音听\n守常安静得便宜", "勿信谗言，静守为佳。"],
+            ["中平", "事业功勤暮与朝\n荣华物态不胜饶\n报君记取金鸡斗\n福禄声名价自超", "勤能补拙，终获成功。"],
+            ["下下", "巍巍宝塔不寻常\n八面玲珑尽放光\n劝君立志勤顶礼\n作善苍天降福祥", "诚心礼佛，积善得福。"],
+            ["中吉", "五十功名心已灰\n那知富贵逼人来\n更行好事存方寸\n寿比冈陵位鼎台", "无心插柳，福寿双全。"],
+            ["上上", "经商得利称心怀\n福禄荣华倍获财\n若问进身谋望事\n秀才一举状元回", "名利双收，前程似锦。"],
+            ["中平", "勒马持鞭直过来\n半有忧危半有灾\n恰似遭火焚烧屋\n天降时雨荡成灰", "有惊无险，灾消福至。"],
+            ["下下", "佛神说尽与君知\n痴人说事转昏迷\n老人抽得灵签足\n不如守旧待来时", "迷途知返，守旧待时。"]
+        ];
+
+        // ==========================================
+        // 2. THE BIO-ENTROPY ENGINE (STRICT CAMERA)
+        // ==========================================
+        class EntropyEngine {
+            constructor() {
+                this.x = 0; this.y = 0; 
+                this.P = 1; this.Q = 0.1; this.R = 0.1;
+                this.seed = new Float32Array([Math.random(), Math.random(), Math.random(), Math.random()]);
+                this.totalEnergy = 0;
+                this.permutationMap = new Array(100).fill(0).map((_, i) => i);
+                this.hasSufficientEntropy = false; 
+            }
+
+            ingestHand(rawX, rawY, openness) {
+                // Kalman Smoothing
+                let P_pred = this.P + this.Q;
+                let K = P_pred / (P_pred + this.R);
+                let prevX = this.x;
+                let prevY = this.y;
+                
+                this.x = prevX + K * (rawX - prevX);
+                this.y = prevY + K * (rawY - prevY);
+                this.P = (1 - K) * P_pred;
+                
+                // Tremor Calculation
+                const dx = rawX - this.x;
+                const dy = rawY - this.y;
+                const movement = Math.sqrt(dx*dx + dy*dy);
+                
+                // ENTROPY INJECTION
+                // Only if hand is opening/open
+                if (openness > 0.4) {
+                    const energyGain = (movement * 10.0 + 0.005) * openness;
+                    this.totalEnergy = Math.min(this.totalEnergy + energyGain, 1.5);
+                    
+                    const s = this.seed;
+                    s[0] = (s[0] + energyGain + s[1] * openness) % 1.0;
+                    s[1] = Math.abs(Math.sin(s[1] * 6.28 + dx * 20.0 * openness));
+                    s[2] = (s[2] * (1.0 + dy) + s[3]) % 1.0;
+                    s[3] = (s[3] + s[0]) % 1.0;
+                    
+                    if (this.totalEnergy > 1.2) this.hasSufficientEntropy = true;
+                }
+            }
+
+            permute() {
+                if (!this.hasSufficientEntropy) {
+                    console.warn("Insufficient ritual entropy. Using default permutation.");
+                }
+
+                // Deterministic PRNG seeded by Bio-Entropy using Mulberry32
+                // This guarantees we always get a valid float in [0, 1) range
+                // preventing array index corruption
+                let seedVal = (this.seed[0] + this.seed[1] + this.seed[2] + this.seed[3]) * 1000000;
+                seedVal = Math.floor(seedVal);
+                
+                const mulberry32 = (a) => {
+                    return function() {
+                      var t = a += 0x6D2B79F5;
+                      t = Math.imul(t ^ t >>> 15, t | 1);
+                      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+                      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+                    }
+                }
+                
+                const random = mulberry32(seedVal);
+
+                // Fisher-Yates Shuffle
+                for (let i = this.permutationMap.length - 1; i > 0; i--) {
+                    const j = Math.floor(random() * (i + 1));
+                    [this.permutationMap[i], this.permutationMap[j]] = [this.permutationMap[j], this.permutationMap[i]];
+                }
+            }
+            
+            getRotationQuaternion() {
+                const q = new THREE.Quaternion();
+                q.setFromEuler(new THREE.Euler(
+                    this.seed[0] * Math.PI * 2,
+                    this.seed[1] * Math.PI * 2,
+                    this.seed[2] * Math.PI * 2
+                ));
+                return q;
+            }
+        }
+
+        // ==========================================
+        // 3. THERMODYNAMIC SHADER (Deep Space Magma)
+        // ==========================================
+        const MagmaShader = {
+            uniforms: {
+                uTime: { value: 0 },
+                uHeat: { value: 0 },
+                uExplosion: { value: 0 },
+                uHoverIdx: { value: -1.0 },
+            },
+            vertexShader: `
+                varying vec3 vNormal;
+                varying vec3 vWorldPos;
+                varying float vHeight;
+                varying float vInstanceId;
+                attribute float instanceIndex;
+                uniform float uTime;
+                uniform float uHeat;
+                uniform float uExplosion;
+
+                vec3 getTurbulence(vec3 p, float heat) {
+                    float t = uTime * 3.0;
+                    float n = sin(p.y*2.0 + t) + sin(p.x*2.0 + t*1.3);
+                    return vec3(
+                        n * 0.2,
+                        sin(p.x*3.0 + t)*0.2,
+                        cos(p.z*3.0 + t)*0.2
+                    ) * heat * 2.0;
+                }
+
+                void main() {
+                    vInstanceId = instanceIndex;
+                    vec3 pos = position;
+                    
+                    if (uExplosion < 0.5) {
+                        vec3 worldInstancePos = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+                        pos += getTurbulence(worldInstancePos, uHeat); 
+                    }
+
+                    vec4 worldPosition = modelMatrix * instanceMatrix * vec4(pos, 1.0);
+                    vWorldPos = worldPosition.xyz;
+                    vHeight = worldPosition.y;
+                    
+                    vNormal = normalize(normalMatrix * mat3(instanceMatrix) * normal);
+                    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vNormal;
+                varying vec3 vWorldPos;
+                varying float vHeight;
+                varying float vInstanceId;
+                uniform float uHeat;
+                uniform float uHoverIdx;
+
+                void main() {
+                    vec3 viewDir = normalize(cameraPosition - vWorldPos);
+                    vec3 normal = normalize(vNormal);
+                    float NdotV = max(dot(normal, viewDir), 0.0);
+
+                    // Height gradient: Deep (-10) to Sky (+10)
+                    float temp = smoothstep(8.0, -8.0, vHeight); 
+                    
+                    // Obsidian (Cold) - Dark blue-ish tint
+                    vec3 colObsidian = vec3(0.01, 0.01, 0.04);
+                    float fresnel = pow(1.0 - NdotV, 3.0);
+                    colObsidian += vec3(0.1, 0.2, 0.4) * fresnel;
+                    
+                    // Magma (Hot) - Orange/Purple energy
+                    vec3 colMagmaCore = vec3(1.0, 0.4, 0.1); 
+                    vec3 colMagmaCrust = vec3(0.1, 0.0, 0.2); 
+                    float noise = sin(vWorldPos.x * 5.0) * cos(vWorldPos.z * 5.0 + uHeat * 5.0);
+                    vec3 colMagma = mix(colMagmaCore, colMagmaCrust, noise * 0.5 + 0.5);
+                    colMagma += colMagmaCore * uHeat * 1.5;
+                    
+                    vec3 finalColor = mix(colObsidian, colMagma, temp);
+                    
+                    if (temp > 0.2) finalColor += colMagmaCore * temp * 0.6;
+                    
+                    // Hover Resonance
+                    if (uHoverIdx > -0.5 && abs(vInstanceId - uHoverIdx) < 0.1) {
+                        finalColor += vec3(0.8, 0.6, 1.0) * 0.5; // Lavender glow
+                        finalColor += colMagmaCore * 0.5 * (sin(uHeat*20.0)*0.5+0.5);
+                    }
+
+                    gl_FragColor = vec4(finalColor, 1.0);
+                }
+            `
+        };
+
+        // ==========================================
+        // 4. MAIN SYSTEM & LOGIC
+        // ==========================================
+        let scene, camera, renderer, composer, mesh;
+        let bio = new EntropyEngine();
+        let dreamAudio = new DreamAudio();
+        let landmarker = null;
+        let video = null;
+        
+        let state = 'IDLE'; 
+        let explosionProgress = 0;
+        let magmaTargets = [];
+        let sphereTargets = [];
+        let lotObjects = new THREE.Object3D();
+        const COUNT = 100;
+        let isCameraActive = false;
+        
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x1e1b4b, 0.02); // Deep Indigo Fog
+
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+            camera.position.set(0, 5, 40);
+
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            container.appendChild(renderer.domElement);
+
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0.1; bloomPass.strength = 1.0; bloomPass.radius = 0.5;
+            
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            const geo = new THREE.BoxGeometry(0.6, 2.0, 0.15);
+            const instanceIndexAttr = new Float32Array(COUNT);
+            for (let i = 0; i < COUNT; i++) instanceIndexAttr[i] = i;
+            geo.setAttribute('instanceIndex', new THREE.InstancedBufferAttribute(instanceIndexAttr, 1));
+
+            const mat = new THREE.ShaderMaterial(MagmaShader);
+            mesh = new THREE.InstancedMesh(geo, mat, COUNT);
+            
+            mesh.frustumCulled = false; 
+            mesh.geometry.computeBoundingSphere();
+            mesh.geometry.boundingSphere.radius = 500; 
+
+            scene.add(mesh);
+
+            for(let i=0; i<COUNT; i++) {
+                magmaTargets.push(new THREE.Vector3(
+                    (Math.random()-0.5) * 15,
+                    -12 + (Math.random()-0.5) * 4,
+                    (Math.random()-0.5) * 15
+                ));
+                
+                const phi = Math.acos(1 - 2 * (i + 0.5) / COUNT);
+                const theta = Math.PI * (1 + Math.sqrt(5)) * (i + 0.5);
+                const r = 14;
+                sphereTargets.push(new THREE.Vector3(
+                    r * Math.sin(phi) * Math.cos(theta),
+                    r * Math.cos(phi),
+                    r * Math.sin(phi) * Math.sin(theta)
+                ));
+            }
+            
+            for(let i=0; i<COUNT; i++) {
+                lotObjects.position.copy(magmaTargets[i]);
+                lotObjects.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+                lotObjects.updateMatrix();
+                mesh.setMatrixAt(i, lotObjects.matrix);
+            }
+
+            animate();
+            
+            window.addEventListener('resize', onResize);
+            document.getElementById('interaction-layer').addEventListener('click', onCanvasClick);
+        }
+
+        // --- HAND OPENNESS ---
+        function calculateHandOpenness(landmarks) {
+            const wrist = landmarks[0];
+            let totalDist = 0;
+            const tips = [4, 8, 12, 16, 20];
+            tips.forEach(idx => {
+                const dx = landmarks[idx].x - wrist.x;
+                const dy = landmarks[idx].y - wrist.y;
+                totalDist += Math.sqrt(dx*dx + dy*dy);
+            });
+            const avgDist = totalDist / 5;
+            return Math.min(Math.max((avgDist - 0.1) / 0.4, 0), 1);
+        }
+
+        document.getElementById('start-btn').addEventListener('click', async () => {
+            const btn = document.getElementById('start-btn');
+            const hud = document.getElementById('hud-text');
+            const spinner = document.getElementById('loading-spinner');
+            const instructions = document.getElementById('instruction-box');
+            
+            // 1. Initialize Audio immediately on gesture
+            dreamAudio.init();
+
+            // 2. Hide Button, Show Spinner & Text
+            btn.style.display = 'none';
+            spinner.style.display = 'block';
+            hud.innerText = "ACCESSING TURING'S DREAM (CAMERA)...";
+            instructions.style.opacity = 1;
+            instructions.style.transform = 'translateY(0)';
+            
+            initCamera().then(success => {
+                spinner.style.display = 'none';
+                if(success) {
+                    hud.innerText = "DREAM SYNCHRONIZED. OPEN HAND SLOWLY.";
+                    isCameraActive = true;
+                    state = 'MAGMA';
+                    
+                    // Fade out instructions after 8 seconds
+                    setTimeout(() => {
+                        instructions.style.opacity = 0;
+                        setTimeout(() => instructions.style.display = 'none', 1000);
+                    }, 8000);
+                } else {
+                    hud.innerText = "ERROR: CAMERA ACCESS DENIED.";
+                }
+            });
+        });
+
+        async function initCamera() {
+            try {
+                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+                landmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+                
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video = document.getElementById('cam-preview');
+                video.srcObject = stream;
+                await new Promise(resolve => {
+                    video.onloadeddata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+                return true;
+            } catch (e) {
+                console.error(e);
+                return false;
+            }
+        }
+
+        // --- ANIMATION ---
+        let lastTime = 0;
+        const mouse = new THREE.Vector2(-999, -999);
+        const raycaster = new THREE.Raycaster();
+        let hoveredIdx = -1;
+        
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        function onCanvasClick() {
+            if(state === 'SELECT' && hoveredIdx !== -1) {
+                revealLot(hoveredIdx);
+            }
+        }
+
+        function revealLot(visualIdx) {
+            // Safety Check: Ensure inputs are valid
+            if (visualIdx === undefined || visualIdx === null || visualIdx < 0) return;
+
+            const dbIndex = bio.permutationMap[visualIdx];
+            
+            // Safety Check: Ensure dbIndex is valid
+            if (dbIndex === undefined || dbIndex < 0 || dbIndex >= LOT_DB.length) {
+                console.error("Critical Error: Invalid Lot Index generated by Entropy Engine.", dbIndex);
+                return;
+            }
+
+            const data = LOT_DB[dbIndex];
+            
+            // Safety Check: Ensure data exists
+            if (!data) {
+                console.error("Critical Error: Lot Data Missing for index", dbIndex);
+                return;
+            }
+            
+            document.getElementById('res-num').innerText = `第 ${dbIndex + 1} 签`;
+            document.getElementById('res-sign').innerText = data[0]; 
+            document.getElementById('res-poem').innerText = data[1]; 
+            document.getElementById('res-note').innerText = data[2]; 
+            
+            const modal = document.getElementById('tablet-modal');
+            modal.style.display = 'flex';
+            void modal.offsetWidth;
+            modal.style.opacity = 1; 
+            modal.style.transform = 'scale(1)';
+            
+            document.getElementById('hud-text').innerText = "FATE REVEALED";
+            state = 'REVEALED';
+        }
+        
+        document.getElementById('close-res').addEventListener('click', ()=>{
+             state = 'MAGMA';
+             explosionProgress = 0;
+             bio.totalEnergy = 0;
+             bio.hasSufficientEntropy = false; 
+             
+             const modal = document.getElementById('tablet-modal');
+             modal.style.opacity = 0;
+             modal.style.transform = 'scale(0.9)';
+             setTimeout(()=> modal.style.display='none', 600);
+             document.getElementById('hud-text').innerText = "OPEN HAND SLOWLY TO DREAM AGAIN";
+        });
+
+        function animate(time) {
+            requestAnimationFrame(animate);
+            const dt = (time - lastTime) / 1000;
+            lastTime = time;
+
+            if(isCameraActive && landmarker && video && video.currentTime > 0) {
+                let results = landmarker.detectForVideo(video, time);
+                if(results.landmarks && results.landmarks.length > 0) {
+                    const landmarks = results.landmarks[0];
+                    const hand = landmarks[8];
+                    const openness = calculateHandOpenness(landmarks);
+                    bio.ingestHand(hand.x, hand.y, openness);
+                }
+            }
+
+            const heat = bio.totalEnergy;
+            
+            // Sync Audio with Heat
+            dreamAudio.setIntensity(heat);
+            
+            if(state === 'MAGMA') {
+                bio.totalEnergy *= 0.98;
+                
+                if (heat > 0.1) {
+                    let percent = Math.min((heat/1.2)*100, 100).toFixed(0);
+                    document.getElementById('hud-text').innerText = `GATHERING ENERGY: ${percent}%`;
+                }
+
+                if(heat >= 1.4) {
+                    state = 'ERUPTION';
+                    document.getElementById('hud-text').innerText = "ERUPTION!";
+                    bio.permute();
+                    const q = bio.getRotationQuaternion();
+                    sphereTargets.forEach(v => v.applyQuaternion(q));
+                }
+            }
+            else if(state === 'ERUPTION') {
+                explosionProgress += dt * 0.5;
+                if(explosionProgress >= 1.0) {
+                    explosionProgress = 1.0;
+                    state = 'COOLING';
+                }
+            }
+            else if(state === 'COOLING') {
+                bio.totalEnergy *= 0.92;
+                if(bio.totalEnergy < 0.1) {
+                    state = 'SELECT';
+                    document.getElementById('hud-text').innerText = "SELECT YOUR DESTINY";
+                }
+            }
+
+            mesh.material.uniforms.uTime.value = time * 0.001;
+            mesh.material.uniforms.uHeat.value = heat;
+            mesh.material.uniforms.uExplosion.value = explosionProgress;
+            mesh.material.uniforms.uHoverIdx.value = hoveredIdx;
+
+            const dummy = new THREE.Object3D();
+
+            for(let i=0; i<COUNT; i++) {
+                const magmaPos = magmaTargets[i];
+                const skyPos = sphereTargets[i];
+                
+                if(state === 'MAGMA') {
+                    const speed = 0.0005 + heat * 0.002;
+                    const angle = time * speed * (i%2==0?1:-1);
+                    const r = 8 + Math.sin(time*0.001 + i)*2;
+                    magmaPos.x = Math.cos(angle + i) * r;
+                    magmaPos.z = Math.sin(angle + i) * r;
+                    magmaPos.y = -12 + Math.sin(time*0.002 + i)*2; 
+                    dummy.position.copy(magmaPos);
+                    dummy.rotation.set(time*0.001*i, time*0.002*i, 0);
+                } 
+                else {
+                    const t = explosionProgress;
+                    const ease = 1 - Math.pow(1 - t, 4);
+                    const currentPos = new THREE.Vector3().lerpVectors(magmaPos, skyPos, ease);
+                    if(state === 'ERUPTION') {
+                        currentPos.add(new THREE.Vector3(
+                            (Math.random()-0.5)*heat*2, 
+                            (Math.random()-0.5)*heat*2, 
+                            (Math.random()-0.5)*heat*2
+                        ));
+                    }
+                    dummy.position.copy(currentPos);
+                    dummy.lookAt(0,0,0);
+                    
+                    if(state === 'SELECT' && hoveredIdx === i) {
+                        dummy.position.multiplyScalar(0.85); 
+                        dummy.scale.setScalar(1.2);
+                    } else {
+                        dummy.scale.setScalar(1.0);
+                    }
+                }
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+            }
+            
+            if(state === 'SELECT') {
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObject(mesh);
+                if(intersects.length > 0) {
+                    hoveredIdx = intersects[0].instanceId;
+                    document.body.style.cursor = 'pointer';
+                } else {
+                    hoveredIdx = -1;
+                    document.body.style.cursor = 'default';
+                }
+            } else {
+                hoveredIdx = -1;
+            }
+
+            mesh.instanceMatrix.needsUpdate = true;
+            
+            camera.position.x = Math.sin(time * 0.0002) * 5;
+            camera.position.y = 5 + Math.cos(time * 0.0003) * 2;
+            camera.lookAt(0,0,0);
+
+            composer.render();
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        initThree();
+    </script>
+</body>
+</html>
